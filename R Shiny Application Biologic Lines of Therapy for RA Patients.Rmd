@@ -1,0 +1,478 @@
+---
+title: "Presentation FINAL (Part 2)"
+date: "2024-07-24"
+output:
+  output: html_document
+    code_download: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### Download correct libraries ###
+```{r}
+## Load the haven package
+library(haven)
+
+## Import the dataset from the SAS file
+sankey_cohort <- read_sas("/path/to/your/final_table (5).sas7bdat")
+baseline_sankey <- read_sas("/path/to/your/final_table_baseline.sas7bdat")
+
+## Library
+library(dplyr)
+library(tidyr)
+library(plotly)
+library(shiny)
+library(lubridate)
+library(DT)
+```
+
+
+### Convert to excel files ###
+```{r}
+library(writexl)
+
+# Save the datasets as Excel files
+write_xlsx(sankey_cohort, "/path/to/your/sankey_cohort.xlsx")
+write_xlsx(baseline_sankey, "/path/to/your/baseline_sankey.xlsx")
+```
+
+
+### R Shiny Application Code ###
+```{r}
+## Define UI
+ui <- fluidPage(
+  navbarPage("Interactive Visualizations",
+    tabPanel("Title Page",
+      titlePanel("Welcome to the Interactive Visualizations App"),
+      h3("Lines of Therapy for Individual Biologics"),
+      p("This application allows you to visualize lines of therapy for individual biologics using Sankey and Pie charts."),
+      p("Use the sidebar to customize the visualizations."),
+      br(), br(),
+      h4("Please see below for all Biological Medications:"),
+      tags$ul(
+        tags$li(strong("TNF inhibitors:"), " Adalimumab, Certolizumab, Etanercept, Golimumab, Infliximab"),
+        tags$li(strong("IL-1 receptor antagonist:"), " Abatacept"),
+        tags$li(strong("IL-1 receptor antagonist:"), " Anakinra"),
+        tags$li(strong("B cell depleting agent:"), " Rituximab"),
+        tags$li(strong("anti IL-6 receptor:"), " Sarilumab, Tocilizumab"),
+        tags$li(strong("Janus Kinase inhibitors (JAKi):"), " Baricitinib, Tofacitinib, Upadacitinib")
+      )
+    ),
+    tabPanel("Baseline",
+      titlePanel("Visualizations"),
+      sidebarLayout(
+        sidebarPanel(
+          checkboxGroupInput("remove_stages_baseline", "Remove Stages:", 
+                             choices = c("med_1", "med_2", "med_3", "med_4")),
+          textInput("remove_meds_baseline", "Remove Medications (comma-separated):", "")
+        ),
+        mainPanel(
+          tabsetPanel(
+            tabPanel("Sankey",
+              plotlyOutput("sankeyPlotBaseline")
+            ),
+            tabPanel("Pie",
+              plotlyOutput("piePlotBaseline")
+            ),
+            tabPanel("Medication Counts",
+              DTOutput("medicationCountsBaseline")
+            )
+          )
+        )
+      )
+    ),
+    tabPanel("Follow Up",
+      titlePanel("Visualizations"),
+      sidebarLayout(
+        sidebarPanel(
+          checkboxGroupInput("remove_stages_followup", "Remove Stages:", 
+                             choices = c("med_1", "med_2", "med_3", "med_4")),
+          textInput("remove_meds_followup", "Remove Medications (comma-separated):", "")
+        ),
+        mainPanel(
+          tabsetPanel(
+            tabPanel("Sankey",
+              plotlyOutput("sankeyPlotFollowUp")
+            ),
+            tabPanel("Pie",
+              plotlyOutput("piePlotFollowUp")
+            ),
+            tabPanel("Medication Counts",
+              DTOutput("medicationCountsFollowUp")
+            )
+          )
+        )
+      )
+    ),
+    tabPanel("Index Year Chart",
+      titlePanel("Index Year Analysis"),
+      mainPanel(
+        tabsetPanel(
+          tabPanel("Baseline",
+            plotlyOutput("indexYearPlotBaseline")
+          ),
+          tabPanel("Follow Up",
+            plotlyOutput("indexYearPlotFollowUp")
+          )
+        )
+      )
+    )
+  )
+)
+
+## Define server logic
+server <- function(input, output) {
+  
+  filtered_data_followup <- reactive({
+    links.df <- sankey_cohort %>%
+      mutate(row = row_number()) %>%
+      pivot_longer(cols = starts_with("med_"), names_to = "column", values_to = "source") %>%
+      filter(source != "" & !is.na(source)) %>%
+      arrange(row, column)
+    
+    if (!is.null(input$remove_stages_followup)) {
+      links.df <- links.df %>%
+        filter(!column %in% input$remove_stages_followup)
+    }
+    
+    if (input$remove_meds_followup != "") {
+      meds_to_remove <- unlist(strsplit(input$remove_meds_followup, ","))
+      meds_to_remove <- trimws(meds_to_remove)
+      links.df <- links.df %>%
+        filter(!source %in% meds_to_remove)
+    }
+    
+    links.df <- links.df %>%
+      mutate(column = match(column, names(sankey_cohort))) %>%
+      group_by(row) %>%
+      mutate(target = lead(source, order_by = column)) %>%
+      ungroup()
+    
+    links.df <- links.df %>%
+      filter(!is.na(target) | column == "3")
+    
+    links.df <- links.df %>%
+      mutate(target = ifelse(is.na(target), source, target)) %>%
+      mutate(source = paste0(source, '_', column)) %>%
+      mutate(target = paste0(target, '_', column + 1)) %>%
+      select(row, column, source, target)
+    
+    links.df <- links.df %>%
+      mutate(target = ifelse(target == "NA_4", "Upadacitinib", target))
+    
+    nodes.df <- data.frame(name = unique(c(links.df$source, links.df$target)))
+    nodes.df$label <- sub('_[0-9]*$', '', nodes.df$name)
+    
+    outgoing_counts <- links.df %>%
+      count(source) %>%
+      rename(name = source, outgoing_count = n)
+    
+    incoming_counts <- links.df %>%
+      count(target) %>%
+      rename(name = target, incoming_count = n)
+    
+    nodes.df <- nodes.df %>%
+      left_join(outgoing_counts, by = "name") %>%
+      left_join(incoming_counts, by = "name") %>%
+      mutate(outgoing_count = ifelse(is.na(outgoing_count), 0, outgoing_count),
+             incoming_count = ifelse(is.na(incoming_count), 0, incoming_count))
+    
+    total_count <- sum(nodes.df$outgoing_count) + sum(nodes.df$incoming_count)
+    
+    nodes.df <- nodes.df %>%
+      mutate(outgoing_percentage = (outgoing_count / total_count) * 100,
+             incoming_percentage = (incoming_count / total_count) * 100)
+    
+    agg_medications <- links.df %>%
+      group_by(row) %>%
+      summarize(all_medications = paste(unique(sub('_.*$', '', c(source, target))), collapse = ", "))
+    
+    links.df <- links.df %>%
+      mutate(source_id = match(source, nodes.df$name) - 1,
+             target_id = match(target, nodes.df$name) - 1,
+             value = 1) %>%
+      left_join(agg_medications, by = "row")
+    
+    list(links.df = links.df, nodes.df = nodes.df)
+  })
+  
+  filtered_data_baseline <- reactive({
+    links.df <- baseline_sankey %>%
+      mutate(row = row_number()) %>%
+      pivot_longer(cols = starts_with("med_"), names_to = "column", values_to = "source") %>%
+      filter(source != "" & !is.na(source)) %>%
+      arrange(row, column)
+    
+    if (!is.null(input$remove_stages_baseline)) {
+      links.df <- links.df %>%
+        filter(!column %in% input$remove_stages_baseline)
+    }
+    
+    if (input$remove_meds_baseline != "") {
+      meds_to_remove <- unlist(strsplit(input$remove_meds_baseline, ","))
+      meds_to_remove <- trimws(meds_to_remove)
+      links.df <- links.df %>%
+        filter(!source %in% meds_to_remove)
+    }
+    
+    links.df <- links.df %>%
+      mutate(column = match(column, names(baseline_sankey))) %>%
+      group_by(row) %>%
+      mutate(target = lead(source, order_by = column)) %>%
+      ungroup()
+    
+    links.df <- links.df %>%
+      filter(!is.na(target) | column == "3")
+    
+    links.df <- links.df %>%
+      mutate(target = ifelse(is.na(target), source, target)) %>%
+      mutate(source = paste0(source, '_', column)) %>%
+      mutate(target = paste0(target, '_', column + 1)) %>%
+      select(row, column, source, target)
+    
+    links.df <- links.df %>%
+      mutate(target = ifelse(target == "NA_4", "STOPS HERE", target))
+    
+    nodes.df <- data.frame(name = unique(c(links.df$source, links.df$target)))
+    nodes.df$label <- sub('_[0-9]*$', '', nodes.df$name)
+    
+    outgoing_counts <- links.df %>%
+      count(source) %>%
+      rename(name = source, outgoing_count = n)
+    
+    incoming_counts <- links.df %>%
+      count(target) %>%
+      rename(name = target, incoming_count = n)
+    
+    nodes.df <- nodes.df %>%
+      left_join(outgoing_counts, by = "name") %>%
+      left_join(incoming_counts, by = "name") %>%
+      mutate(outgoing_count = ifelse(is.na(outgoing_count), 0, outgoing_count),
+             incoming_count = ifelse(is.na(incoming_count), 0, incoming_count))
+    
+    total_count <- sum(nodes.df$outgoing_count) + sum(nodes.df$incoming_count)
+    
+    nodes.df <- nodes.df %>%
+      mutate(outgoing_percentage = (outgoing_count / total_count) * 100,
+             incoming_percentage = (incoming_count / total_count) * 100)
+    
+    agg_medications <- links.df %>%
+      group_by(row) %>%
+      summarize(all_medications = paste(unique(sub('_.*$', '', c(source, target))), collapse = ", "))
+    
+    links.df <- links.df %>%
+      mutate(source_id = match(source, nodes.df$name) - 1,
+             target_id = match(target, nodes.df$name) - 1,
+             value = 1) %>%
+      left_join(agg_medications, by = "row")
+    
+    list(links.df = links.df, nodes.df = nodes.df)
+  })
+  
+  output$sankeyPlotFollowUp <- renderPlotly({
+    data <- filtered_data_followup()
+    
+    plot_ly(
+      type = "sankey",
+      orientation = "h",
+      node = list(
+        pad = 15,
+        thickness = 20,
+        line = list(color = "black", width = 0.5),
+        label = data$nodes.df$label,
+        customdata = data$nodes.df %>%
+          select(incoming_count, incoming_percentage, outgoing_count, outgoing_percentage) %>%
+          as.matrix(),
+        hovertemplate = paste(
+          "%{label}<br>",
+          "Incoming count: %{customdata[0]}<br>",
+          "Outgoing count: %{customdata[2]}<br>",
+          "Incoming percentage: %{customdata[1]}%<br>",
+          "Outgoing percentage: %{customdata[3]}%<extra></extra>"
+        )
+      ),
+      link = list(
+        source = data$links.df$source_id,
+        target = data$links.df$target_id,
+        value = data$links.df$value,
+        customdata = data$links.df$all_medications,
+        hovertemplate = paste(
+          "Medications: %{customdata}<extra></extra>"
+        )
+      )
+    ) %>%
+      layout(
+        title = "Lines of Therapy for Individual Biologics",
+        font = list(size = 10),
+        xaxis = list(title = ""),
+        yaxis = list(title = "")
+      )
+  })
+  
+  output$sankeyPlotBaseline <- renderPlotly({
+    data <- filtered_data_baseline()
+    
+    plot_ly(
+      type = "sankey",
+      orientation = "h",
+      node = list(
+        pad = 15,
+        thickness = 20,
+        line = list(color = "black", width = 0.5),
+        label = data$nodes.df$label,
+        customdata = data$nodes.df %>%
+          select(incoming_count, incoming_percentage, outgoing_count, outgoing_percentage) %>%
+          as.matrix(),
+        hovertemplate = paste(
+          "%{label}<br>",
+          "Incoming count: %{customdata[0]}<br>",
+          "Outgoing count: %{customdata[2]}<br>",
+          "Incoming percentage: %{customdata[1]}%<br>",
+          "Outgoing percentage: %{customdata[3]}%<extra></extra>"
+        )
+      ),
+      link = list(
+        source = data$links.df$source_id,
+        target = data$links.df$target_id,
+        value = data$links.df$value,
+        customdata = data$links.df$all_medications,
+        hovertemplate = paste(
+          "Medications: %{customdata}<extra></extra>"
+        )
+      )
+    ) %>%
+      layout(
+        title = "Lines of Therapy for Individual Biologics",
+        font = list(size = 10),
+        xaxis = list(title = ""),
+        yaxis = list(title = "")
+      )
+  })
+  
+  output$piePlotFollowUp <- renderPlotly({
+    data <- filtered_data_followup()
+    
+    pie_data <- data$links.df %>%
+      select(source, target) %>%
+      pivot_longer(cols = everything(), names_to = "key", values_to = "medication") %>%
+      count(medication, name = "count")
+    
+    plot_ly(
+      pie_data,
+      labels = ~medication,
+      values = ~count,
+      type = 'pie',
+      textinfo = 'none',
+      hoverinfo = 'label+percent+value'
+    ) %>%
+      layout(
+        title = "Pie Chart: Medication Distribution",
+        margin = list(l = 40, r = 20, b = 50, t = 50)
+      )
+  })
+  
+  output$piePlotBaseline <- renderPlotly({
+    data <- filtered_data_baseline()
+    
+    pie_data <- data$links.df %>%
+      select(source, target) %>%
+      pivot_longer(cols = everything(), names_to = "key", values_to = "medication") %>%
+      count(medication, name = "count")
+    
+    plot_ly(
+      pie_data,
+      labels = ~medication,
+      values = ~count,
+      type = 'pie',
+      textinfo = 'none',
+      hoverinfo = 'label+percent+value'
+    ) %>%
+      layout(
+        title = "Pie Chart: Medication Distribution",
+        margin = list(l = 40, r = 20, b = 50, t = 50)
+      )
+  })
+  
+   output$indexYearPlotFollowUp <- renderPlotly({
+    index_year_data <- sankey_cohort %>%
+      mutate(index_year = year(index_date)) %>%
+      pivot_longer(cols = starts_with("med_"), names_to = "column", values_to = "medication") %>%
+      filter(medication != "" & !is.na(medication)) %>%
+      group_by(index_year, medication) %>%
+      summarize(count = n(), .groups = 'drop') %>%
+      arrange(index_year, medication)
+    
+    plot_ly(index_year_data, x = ~index_year, y = ~count, color = ~medication, type = 'bar',
+            text = ~paste("Medication: ", medication, "<br>Count: ", count),
+            hoverinfo = 'text') %>%
+      layout(
+        title = "Medication Counts by Index Year",
+        xaxis = list(title = "Index Year"),
+        yaxis = list(title = "Count")
+      )
+  })
+  
+  output$indexYearPlotBaseline <- renderPlotly({
+    index_year_data <- baseline_sankey %>%
+      mutate(index_year = year(index_date)) %>%
+      pivot_longer(cols = starts_with("med_"), names_to = "column", values_to = "medication") %>%
+      filter(medication != "" & !is.na(medication)) %>%
+      group_by(index_year, medication) %>%
+      summarize(count = n(), .groups = 'drop') %>%
+      arrange(index_year, medication)
+    
+    plot_ly(index_year_data, x = ~index_year, y = ~count, color = ~medication, type = 'bar',
+            text = ~paste("Medication: ", medication, "<br>Count: ", count),
+            hoverinfo = 'text') %>%
+      layout(
+        title = "Medication Counts by Index Year",
+        xaxis = list(title = "Index Year"),
+        yaxis = list(title = "Count")
+      )
+  })
+
+   output$medicationCountsFollowUp <- renderDT({
+  data <- filtered_data_followup()
+  medication_counts <- data$nodes.df %>%
+    select(name, outgoing_count, incoming_count) %>%
+    mutate(counts = case_when(
+      grepl('_3$', name) ~ outgoing_count,
+      TRUE ~ incoming_count
+    )) %>%
+    mutate(Medication = case_when(
+      grepl('_3$', name) ~ paste0("1st Biologic: ", sub('_3$', '', name)),
+      grepl('_4$', name) ~ paste0("2nd Biologic: ", sub('_4$', '', name)),
+      grepl('_5$', name) ~ paste0("3rd Biologic: ", sub('_5$', '', name)),
+      grepl('_6$', name) ~ paste0("4th Biologic: ", sub('_6$', '', name)),
+      TRUE ~ name
+    )) %>%
+    select(Medication, Patients = counts)
+  datatable(medication_counts, options = list(pageLength = 10, scrollX = TRUE))
+})
+
+output$medicationCountsBaseline <- renderDT({
+  data <- filtered_data_baseline()
+  medication_counts <- data$nodes.df %>%
+    select(name, outgoing_count, incoming_count) %>%
+    mutate(counts = case_when(
+      grepl('_3$', name) ~ outgoing_count,
+      TRUE ~ incoming_count
+    )) %>%
+    mutate(Medication = case_when(
+      grepl('_3$', name) ~ paste0("1st Biologic: ", sub('_3$', '', name)),
+      grepl('_4$', name) ~ paste0("2nd Biologic: ", sub('_4$', '', name)),
+      grepl('_5$', name) ~ paste0("3rd Biologic: ", sub('_5$', '', name)),
+      grepl('_6$', name) ~ paste0("4th Biologic: ", sub('_6$', '', name)),
+      TRUE ~ name
+    )) %>%
+    select(Medication, Patients = counts)
+  datatable(medication_counts, options = list(pageLength = 10, scrollX = TRUE))
+})
+}
+## Run the application 
+shinyApp(ui = ui, server = server)
+```
+

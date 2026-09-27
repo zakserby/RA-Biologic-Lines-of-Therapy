@@ -1,0 +1,213 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-07-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### Download correct libraries ###
+```{r}
+## Load the haven package
+library(haven)
+
+# Import the dataset from the SAS file
+sankey_cohort <- read_sas("/path/to/your/final_table (3).sas7bdat")
+
+## Save the dataset as an .rds file
+saveRDS(sankey_cohort, "/path/to/your/sankey_cohort.rds")
+## Load the dataset from the .rds file
+sankey_cohort <- readRDS("/path/to/your/sankey_cohort.rds")
+
+## Library
+library(ggplot2)
+library(networkD3)
+library(dplyr)
+library(pander)
+library(tidyr)
+library(shiny)
+library(plotly)
+```
+
+
+### Sankey Diagram Using Network D3 Package ###
+```{r}
+## Reshape the data to long format and remove enrolid
+links.df <- sankey_cohort %>%
+  mutate(row = row_number()) %>% 
+  pivot_longer(cols = starts_with("med_"), names_to = "column", values_to = "source") %>%
+  filter(source != "" & !is.na(source)) %>%  # Filter out blank and NA values
+  arrange(row, column)  # Ensure correct order
+
+## Create target column
+links.df <- links.df %>%
+  mutate(column = match(column, names(sankey_cohort))) %>%
+  group_by(row) %>%
+  mutate(target = lead(source, order_by = column)) %>%
+  ungroup()
+
+## Remove NAs in the target column unless the associated source column is Upadacitinib_1
+links.df <- links.df %>%
+  filter(!is.na(target) | column == "2")
+
+## Add unique suffix to source and target
+links.df <- links.df %>%
+  mutate(source = paste0(source, '_', column)) %>%
+  mutate(target = paste0(target, '_', column + 1)) %>%
+  select(row, column, source, target)
+
+## Replace 'NA_3' values in the target column with 'Upadacitinib'
+links.df <- links.df %>%
+  mutate(target = ifelse(target == "NA_3", "Upadacitinib", target))
+
+## Create nodes data frame
+nodes.df <- data.frame(name = unique(c(links.df$source, links.df$target)))
+
+## Order nodes alphabetically
+nodes.df <- nodes.df %>%
+  arrange(name) %>%
+  mutate(label = sub('_[0-9]*$', '', name))
+
+## Add source_id and target_id to links
+links.df <- links.df %>%
+  mutate(source_id = match(source, nodes.df$name) - 1,
+         target_id = match(target, nodes.df$name) - 1,
+         value = 1)
+
+## Generate Sankey diagram
+sankeyNetwork(Links = links.df,
+              Nodes = nodes.df,
+              Source = 'source_id',
+              Target = 'target_id',
+              Value = 'value',
+              NodeID = 'label',
+              fontSize = 16,
+              nodeWidth = 30,
+              nodePadding = 20,
+              width = 1200,
+              height = 800,
+              iterations = 0,
+              sinksRight = FALSE) %>%
+    htmlwidgets::onRender("
+    function(el, x) {
+      d3.select(el).select('svg')
+        .call(d3.zoom().on('zoom', function() {
+          d3.select(el).select('svg g')
+            .attr('transform', d3.event.transform);
+        }));
+    }
+  ")
+```
+
+
+### Sankey Diagram Using Plotly Package ###
+```{r}
+## Reshape the data to long format and remove enrolid
+links.df <- sankey_cohort %>%
+  mutate(row = row_number()) %>%
+  pivot_longer(cols = starts_with("med_"), names_to = "column", values_to = "source") %>%
+  filter(source != "" & !is.na(source)) %>%  # Filter out blank and NA values
+  arrange(row, column)  # Ensure correct order
+
+## Create target column
+links.df <- links.df %>%
+  mutate(column = match(column, names(sankey_cohort))) %>%
+  group_by(row) %>%
+  mutate(target = lead(source, order_by = column)) %>%
+  ungroup()
+
+## Remove NAs in the target column unless the associated source column is Upadacitinib_1
+links.df <- links.df %>%
+  filter(!is.na(target) | column == "2")
+
+## Add unique suffix to source and target
+links.df <- links.df %>%
+  mutate(source = paste0(source, '_', column)) %>%
+  mutate(target = paste0(target, '_', column + 1)) %>%
+  select(row, column, source, target)
+
+## Replace 'NA_3' values in the target column with 'Upadacitinib'
+links.df <- links.df %>%
+  mutate(target = ifelse(target == "NA_3", "Upadacitinib", target))
+
+## Create nodes data frame
+nodes.df <- data.frame(name = unique(c(links.df$source, links.df$target)))
+nodes.df$label <- sub('_[0-9]*$', '', nodes.df$name)
+
+## Calculate outgoing and incoming counts for each node
+outgoing_counts <- links.df %>%
+  count(source) %>%
+  rename(name = source, outgoing_count = n)
+
+incoming_counts <- links.df %>%
+  count(target) %>%
+  rename(name = target, incoming_count = n)
+
+## Combine counts
+nodes.df <- nodes.df %>%
+  left_join(outgoing_counts, by = "name") %>%
+  left_join(incoming_counts, by = "name") %>%
+  mutate(outgoing_count = ifelse(is.na(outgoing_count), 0, outgoing_count),
+         incoming_count = ifelse(is.na(incoming_count), 0, incoming_count))
+
+## Calculate total counts
+total_count <- sum(nodes.df$outgoing_count) + sum(nodes.df$incoming_count)
+
+## Calculate percentages
+nodes.df <- nodes.df %>%
+  mutate(outgoing_percentage = (outgoing_count / total_count) * 100,
+         incoming_percentage = (incoming_count / total_count) * 100)
+
+## Aggregate unique medications for each enrolid
+agg_medications <- links.df %>%
+  group_by(row) %>%
+  summarize(all_medications = paste(unique(sub('_.*$', '', c(source, target))), collapse = ", "))
+
+## Add source_id and target_id to links
+links.df <- links.df %>%
+  mutate(source_id = match(source, nodes.df$name) - 1,
+         target_id = match(target, nodes.df$name) - 1,
+         value = 1) %>%
+  left_join(agg_medications, by = "row")
+
+## Create Sankey diagram using Plotly
+plot_ly(
+  type = "sankey",
+  orientation = "h",
+  node = list(
+    pad = 15,
+    thickness = 20,
+    line = list(color = "black", width = 0.5),
+    label = nodes.df$label,
+    customdata = nodes.df %>%
+      select(incoming_count, incoming_percentage, outgoing_count, outgoing_percentage) %>%
+      as.matrix(),
+    hovertemplate = paste(
+      "%{label}<br>",
+      "Incoming count: %{customdata[0]}<br>",
+      "Outgoing count: %{customdata[2]}<br>",
+      "Incoming percentage: %{customdata[1]}%<br>",
+      "Outgoing percentage: %{customdata[3]}%<extra></extra>"
+    )
+  ),
+  link = list(
+    source = links.df$source_id,
+    target = links.df$target_id,
+    value = links.df$value,
+    customdata = links.df$all_medications,
+    hovertemplate = paste(
+      "Medications: %{customdata}<extra></extra>"
+    )
+  )
+) %>%
+  layout(
+    title = "Sankey Diagram: Lines of Therapy for Individual Biologics in Follow-up",
+    font = list(size = 10),
+    xaxis = list(title = ""),
+    yaxis = list(title = "")
+  )
+```
+
